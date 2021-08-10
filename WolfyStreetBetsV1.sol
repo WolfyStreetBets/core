@@ -1066,7 +1066,7 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     * @return HRLiq user liquidity in high risk pool (uint256)
     */
     function getLiquidityStatsPerUser() external view returns (uint256 LPFeesCollected, uint256 LRLiq, uint256 HRLiq) {
-        return (userLPReward[_msgSender()].div(10**decimals()), currentLowLiquidity[_msgSender()], currentHighLiquidity[_msgSender()]);
+        return (userLPReward[_msgSender()].div(10**decimals()), currentLowLiquidity[_msgSender()], currentHighLiquidity[_msgSender()], currentLowLiquidity[_msgSender()].add(currentHighLiquidity[_msgSender()]));
     }
 
     /**
