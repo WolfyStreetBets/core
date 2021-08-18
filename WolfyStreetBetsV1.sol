@@ -525,6 +525,25 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
         TOKEN = IERC20(_token);
     }
 
+    // WolfyStBets - reduce risk of overflow for exponential mathematical operations (not available in SafeMath)
+    function pow (uint256 base, uint256 exponent) internal pure returns (uint256) {
+        if (exponent == 0) {
+            return 1;
+        }
+        else if (exponent == 1) {
+            return base;
+        }
+        else if (base == 0 && exponent != 0) {
+            return 0;
+        }
+        // (base * base) * exp
+        else {
+            uint256 c = base.mul(base);
+            uint256 x = c.mul(exponent);
+            return x;
+        }
+    }
+
     struct LiquidityDetails {
         uint256 _lowRisk;
         uint256 _highRisk;
@@ -535,7 +554,6 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
         bool isLoss;       
     }
 
-    LiquidityDetails[] tempRecordForloss;
     LiquidityDetails[] LiquidityDetailsRecord;
     LiquidityDetails liquidityDetailsOwner;
 
@@ -591,6 +609,18 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     mapping(address => uint256) userLPReward;
     mapping (address => RewardPaid[]) rewardPaidRecord;
 
+    event TrustedForwarderSet(address _trustedForwarder);
+    event LwinFactorSet(uint256 _winFactorL);
+    event HwinFactorSet(uint256 _winFactorH);
+    event NewUserStored(address indexed _user);
+    event PoolStarted(uint256 indexed _timestamp);
+    event PoolStopped(uint256 indexed _timestamp);
+    event NewStake(uint256 _amount, bool indexed _isLowRisk);
+    event PredictionWon(bool indexed _isLowRisk);
+    event PredictionStakeWithdrawn(uint256 _amount, bool indexed _isLowRisk);
+    event LiquidityAdded(uint256 _amount, bool indexed _isLowRisk);
+    event LPFeeCollected(uint256 _amount, uint256 indexed _timestamp);
+
     /**
      * @dev poolStopped => liquidityCycle = true; => 12hr "liquidity cycle"
      * @dev timebox for "natural" liquidity change in pools whereby LPs can withdraw liquidity
@@ -602,9 +632,11 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     /**
     * @dev Updates trusted forwarder should biconomy upgrades occur.
     */
-    function setTrustedForwarder(address _trustedForwarder) public view onlyOwner {
+    function setTrustedForwarder(address _trustedForwarder) external view onlyOwner {
         require (_trustedForwarder != address(0), "Address cannot be 0x0");
         require (_trustedForwarder != address(this), "Address cannot be contract address");
+        trustedForwader = _trustedForwarder;
+        emit TrustedForwarderSet(trustedForwarder);
     }
 
     /**
@@ -626,17 +658,19 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     /**
     * @dev Sets win requirement for low risk (LR) predictions as a multiplier.
     */
-    function setWinFactorL(uint256 _winFactorL) public onlyOwner {
+    function setWinFactorL(uint256 _winFactorL) external onlyOwner {
         require(poolStarted == false, "Pool has already been started!");
         winFactorL =  _winFactorL;
+        emit LwinFactorSet(winFactorL);
     }
 
     /**
     * @dev Sets win requirement for high risk (HR) predictions as a multiplier.
     */
-    function setWinFactorH(uint256 _winFactorH) public onlyOwner {
+    function setWinFactorH(uint256 _winFactorH) external onlyOwner {
         require(poolStarted == false, "Pool has already been started!");
         winFactorH = _winFactorH;
+        emit HwinFactorSet(winFactorH);
     }
 
     /**
@@ -652,7 +686,8 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
             }
         }
             if (checker == false) {
-                arrayData.push(receiver) ;
+                arrayData.push(receiver);
+                emit NewUserStored(receiver);
             }
     }
 
@@ -661,10 +696,12 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     * @param _predictionAsset1 current price of prediction asset 1 (uint256)
     * @param _predictionAsset2 current price of prediction asset 2 (uint256)
     */
-    function startPool(uint256 _predictionAsset1, uint256 _predictionAsset2) public onlyOwner {            
+    function startPool(uint256 _predictionAsset1, uint256 _predictionAsset2) external onlyOwner {            
         require(!poolStarted, "Previous pool not finalized yet");
-        require(totalLiquidityLowRisk + liquidityDetailsOwner._lowRisk > 0 ," Low Risk Pool: Please add liquidity");
-        require(totalLiquidityHighRisk + liquidityDetailsOwner._highRisk > 0 ," High Risk Pool: Please add liquidity");
+        require(totalLiquidityLowRisk.add(liquidityDetailsOwner._lowRisk) > 0 ," Low Risk Pool: Please add liquidity");
+        require(totalLiquidityHighRisk.add(liquidityDetailsOwner._highRisk) > 0 ," High Risk Pool: Please add liquidity");
+        require(_predictionAsset1 > 0 , "asset start price must be > 0");
+        require(_predictionAsset2 > 0 , "asset start price must be > 0");
         // 30 minutes for testing ONLY
         require(block.timestamp > liquidityCycleStartTime.add(30 minutes), "Cannot start pool during liquidity cycle");
         // PLEASE UNCOMMENT ME FOR MAINNET
@@ -672,11 +709,11 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
 
         predictionAsset1 = _predictionAsset1;
         predictionAsset2 = _predictionAsset2;
-       
         poolStartTime = block.timestamp;
         poolStarted = true;
-
         liquidityCycle = false;
+
+        emit PoolStarted(poolStartTime);
     }
    
     /**
@@ -684,20 +721,19 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     * @param _predictionAsset1 current price of prediction asset 1 (uint256)
     * @param _predictionAsset2 current price of prediction asset 2 (uint256)
     */
-    function stopPool(uint256 _predictionAsset1, uint256 _predictionAsset2) public onlyOwner { 
+    function stopPool(uint256 _predictionAsset1, uint256 _predictionAsset2) external onlyOwner { 
         // PLEASE UNCOMMENT ME FOR MAINNET
         // require(block.timestamp > poolStartTime.add(7 days), "Can stop after 7 days"); ### 7 days #### Mainnet        
         require(poolStarted, "Pool has not been started!");
-    
         (netPredictionAsset1, A) = raisePercent(predictionAsset1,_predictionAsset1);
         (netPredictionAsset2, B)  = raisePercent(predictionAsset2,_predictionAsset2);
-        
         checkPerformance(netPredictionAsset1, netPredictionAsset2, A, B);
-       
         rewardManager(winnerScale, isWin);
         poolStarted = false;
         liquidityCycle = true;
         liquidityCycleStartTime = block.timestamp;
+
+        emit PoolStopped(liquidityCycleStartTime);
     }
 
     /**
@@ -705,36 +741,29 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     * @param _amount (uint256)
     * @param _isLowRisk stake in low risk or high risk pool
     */
-    function stake(uint256 _amount, bool _isLowRisk) public {        
+    function stake(uint256 _amount, bool _isLowRisk) external {        
         require(_amount > 0 , "You can't stake with 0. Choose an amount!");
         require(poolStarted, "Cannot stake until pool has been started!");
         // FOR MAINNET PLEASE UNCOMMENT ME
         // require(block.timestamp <= poolStartTime.add(12 hours),"12 hour staking window has now passed!" ); // Can stake upto 12 hours from start pool.
 
         uint256 stakeAmount;
-
-        if (liquidityReward >= 1) {
-          stakeAmount = _amount.sub(((_amount.mul(liquidityReward)).div(100)).div(10));
-        }
-        else {
-          stakeAmount = _amount;
-        }
-        if (_isLowRisk) {    
-            require(ledgerL.add(stakeAmount) <= (totalLiquidityLowRisk + liquidityDetailsOwner._lowRisk).mul(6), "Low risk pool: Staking limit reached!");   
-            require(_poolBalances[_msgSender()][_isLowRisk].add(stakeAmount) <= (totalLiquidityLowRisk + liquidityDetailsOwner._lowRisk).mul(6), "Low risk pool: Staking limit reached!");
+        stakeAmount = _amount.sub(((_amount.mul(liquidityReward)).div(100)).div(10));truerisk pool: Staking limit reached!");   
+            require(_poolBalances[_msgSender()][_isLowRisk].add(stakeAmount) <= (totalLiquidityLowRisk.add(liquidityDetailsOwner._lowRisk)).mul(6), "Low risk pool: Staking limit reached!");
             liquidityRewardCollectedLowRisk += ((_amount.mul(liquidityReward)).div(100)).div(10);
             ledgerL += stakeAmount;
+            emit NewStake(stakeAmount, true);
         } 
         else {
-            require(ledgerH.add(stakeAmount) <= (totalLiquidityHighRisk + liquidityDetailsOwner._highRisk).mul(3), "High risk pool: Staking limit reached!");
-            require(_poolBalances[_msgSender()][_isLowRisk].add(stakeAmount) <= (totalLiquidityHighRisk + liquidityDetailsOwner._highRisk).mul(3), "High risk pool: Staking limit reached!");
+            require(ledgerH.add(stakeAmount) <= (totalLiquidityHighRisk.add(liquidityDetailsOwner._highRisk)).mul(3), "High risk pool: Staking limit reached!");
+            require(_poolBalances[_msgSender()][_isLowRisk].add(stakeAmount) <= (totalLiquidityHighRisk.add(liquidityDetailsOwner._highRisk)).mul(3), "High risk pool: Staking limit reached!");
             liquidityRewardCollectedHighRisk += ((_amount.mul(liquidityReward)).div(100)).div(10);
             ledgerH += stakeAmount;
+            emit NewStake(stakeAmount, false);
         }
         _isLowRisk == true ? storeUsers(_msgSender(), _lowRiskUsers): storeUsers(_msgSender(), _highRiskUsers); 
         _poolBalances[_msgSender()][_isLowRisk] += stakeAmount;
         TOKEN.safeTransferFrom(_msgSender(), address(this), _amount);        
-
         distributeLiquidityRewards(true);
         distributeLiquidityRewards(false);
     }
@@ -766,38 +795,27 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
         if (totalWinHighRisk >= liquidityDetailsOwner._highRisk) {          
             uint256 cloneTotalLiquidityHighRisk = totalLiquidityHighRisk;
             uint256 diffrenceTobePaidHighRisk = totalWinHighRisk.sub(liquidityDetailsOwner._highRisk);
-            for (uint256 i=0;i<LiquidityHRUsers.length;i++) {              
+            for (uint256 i=0; i<LiquidityHRUsers.length; i++) {              
                 uint256 deductionPercentage = (currentHighLiquidity[LiquidityHRUsers[i]].mul(100))/cloneTotalLiquidityHighRisk;        
                 uint256 amount = (diffrenceTobePaidHighRisk.mul(deductionPercentage)).div(100);               
                 currentHighLiquidity[LiquidityHRUsers[i]] -= amount;               
-                tempRecordForloss.push(LiquidityDetails(0,amount,LiquidityHRUsers[i],block.timestamp,false,false,true));              
+                LiquidityDetailsRecord.push(LiquidityDetails(0,amount,LiquidityHRUsers[i],block.timestamp,false,false,true));              
                 totalLiquidityHighRisk -= amount;
-            }
-            for (uint256 i=0;i<tempRecordForloss.length;i++) {
-                LiquidityDetailsRecord.push(tempRecordForloss[i]);
-            }
-             
-            liquidityDetailsOwner._highRisk = 0;
-            delete tempRecordForloss;
-            
+            }           
+            liquidityDetailsOwner._highRisk = 0;            
         }
         if (totalWinLowRisk >= liquidityDetailsOwner._lowRisk) {
              uint256 diffrenceTobePaidLowRisk = totalWinLowRisk.sub(liquidityDetailsOwner._lowRisk);
              uint256 clonetotalLiquidityLowRisk =totalLiquidityLowRisk;
-            for (uint256 i=0;i<LiquidityLRUsers.length;i++) {
+            for (uint256 i=0; i<LiquidityLRUsers.length; i++) {
                 uint256 deductionPercentage = (currentLowLiquidity[LiquidityLRUsers[i]].mul(100))/clonetotalLiquidityLowRisk;
                 uint256 amount =  (diffrenceTobePaidLowRisk.mul(deductionPercentage)).div(100);                 
                 currentLowLiquidity[LiquidityLRUsers[i]] -= amount;                
-                tempRecordForloss.push(LiquidityDetails(amount,0,LiquidityLRUsers[i],block.timestamp,true,false,true));
+                LiquidityDetailsRecord.push(LiquidityDetails(amount,0,LiquidityLRUsers[i],block.timestamp,true,false,true));
                 totalLiquidityLowRisk -= amount;
                 
             }
-            for (uint256 i=0;i<tempRecordForloss.length;i++) {
-                LiquidityDetailsRecord.push(tempRecordForloss[i]);
-            }
-          
             liquidityDetailsOwner._lowRisk = 0;
-            delete tempRecordForloss;
         }              
     }
     
@@ -823,11 +841,12 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
                     _poolBalances[_lowRiskUsers[i]][true] += _poolBalances[_lowRiskUsers[i]][true].mul(120).div(1000);
                     previousResultRecord.push(ResultRecord(true,true));
                 }       
-            }         
+            } 
+            emit PredictionWon(true);        
         } 
         else {
             // LR | LOSS => -15%
-            for (uint i = 0 ; i < _lowRiskUsers.length ; i++){
+            for (uint i = 0 ; i < _lowRiskUsers.length ; i++) {
                 liquidityDetailsOwner._lowRisk += _poolBalances[_lowRiskUsers[i]][true].mul(150).div(1000);
                 _losingStakers[_lowRiskUsers[i]][true] += _poolBalances[_lowRiskUsers[i]][true].mul(150).div(1000);
                 _poolBalances[_lowRiskUsers[i]][true] -= _poolBalances[_lowRiskUsers[i]][true].mul(150).div(1000);
@@ -838,7 +857,7 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
         // HR wl  
         if (_factor >= winFactorL && _res == true) {         
             // HR | PROFIT => +30%
-            for (uint i = 0 ; i < _highRiskUsers.length ; i++){               
+            for (uint i = 0 ; i < _highRiskUsers.length ; i++) {               
                 if (liquidityDetailsOwner._highRisk >= _poolBalances[_highRiskUsers[i]][false].mul(300).div(1000)) {
                     liquidityDetailsOwner._highRisk -= _poolBalances[_highRiskUsers[i]][false].mul(300).div(1000);                    
                     _profitStakers[_highRiskUsers[i]][false] += _poolBalances[_highRiskUsers[i]][false].mul(300).div(1000);
@@ -851,7 +870,8 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
                     _poolBalances[_highRiskUsers[i]][false] += _poolBalances[_highRiskUsers[i]][false].mul(300).div(1000);
                     previousResultRecord.push(ResultRecord(false,true));
                 }
-            }           
+            } 
+            emit PredictionWon(false);          
         } 
         else {
             // HR | LOSS => -35%
@@ -911,19 +931,21 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     * @param _amount (uint256)
     * @param _isLowRisk risk pool (bool)
     */
-    function withdrawPredictionStake(uint256 _amount, bool _isLowRisk) public nonReentrant {
+    function withdrawPredictionStake(uint256 _amount, bool _isLowRisk) external nonReentrant {
         require(!poolStarted, "Cannot withdraw Asset while pool is running");
         require(_msgSender() != owner());
         require(_amount <= _poolBalances[_msgSender()][_isLowRisk], "Insufficient Balance");
         _poolBalances[_msgSender()][_isLowRisk] -= _amount;
-        TOKEN.safeTransfer(_msgSender(), _amount);
 
         if (_isLowRisk) {
             ledgerL -= _amount;
+            emit PredictionStakeWithdrawn(_amount, true);
         } 
         else {
             ledgerH -= _amount;
+            emit PredictionStakeWithdrawn(_amount, false);
         }   
+        TOKEN.safeTransfer(_msgSender(), _amount);
     }
 
     /**
@@ -945,26 +967,22 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     * @param amount (uint256)
     * @param _isLowRisk (bool)
     */
-    function provideLiquidity(uint256 amount, bool _isLowRisk) public {
+    function provideLiquidity(uint256 amount, bool _isLowRisk) external {
         if (_msgSender() != owner()) {
             if (_isLowRisk) {
                 LiquidityDetailsRecord.push(LiquidityDetails(amount,0,_msgSender(),block.timestamp,true,false,false));
-            }
-            else {
-                LiquidityDetailsRecord.push(LiquidityDetails(0,amount,_msgSender(),block.timestamp,false,false,false));
-            }
-            if (_isLowRisk == true) {
                 totalLiquidityLowRisk += amount;
                 currentLowLiquidity[_msgSender()] += amount;
                 storeUsers(_msgSender(),LiquidityLRUsers);
-            
+                emit LiquidityAdded(amount, true);
             }
             else {
+                LiquidityDetailsRecord.push(LiquidityDetails(0,amount,_msgSender(),block.timestamp,false,false,false));
                 totalLiquidityHighRisk += amount;
                 currentHighLiquidity[_msgSender()] += amount;
                 storeUsers(_msgSender(),LiquidityHRUsers);
-            }
-            
+                emit LiquidityAdded(amount, false);
+            }          
         }
          if (_msgSender() == owner() && _isLowRisk) {
             liquidityDetailsOwner._address = owner();
@@ -1010,17 +1028,23 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     * @param _isLowRisk (bool)
     */   
     function  distributeLiquidityRewards(bool _isLowRisk) internal {
+        // vars to avoid precision loss
+        uint256 powDecimal = 10.pow(decimals());
+        uint256 powDecimalPerc = 100.mul(expDecimal);
+        uint256 lrPowDecimal = totalLiquidityLowRisk.mul(powDecimal);
+        uint256 hrPowDecimal = totalLiquidityHighRisk.mul(powDecimal);
+         
         for (uint i=0;i<LiquidityDetailsRecord.length;i++) {
             if (_isLowRisk && LiquidityDetailsRecord[i].isLowRisk == true) {
-                uint256 rewardPerc = ((LiquidityDetailsRecord[i]._lowRisk.mul(10**decimals())).mul(100*10**decimals())).div(totalLiquidityLowRisk.mul(10**decimals()));              
-                uint256 rewardAmount = ((liquidityRewardCollectedLowRisk.mul(10**decimals()) ).mul(rewardPerc) )/(100 * 10**decimals());         
-                rewardPaidRecord[LiquidityDetailsRecord[i]._address].push(RewardPaid(rewardAmount.div(10**decimals()),block.timestamp,false));              
+                uint256 rewardPerc = ((LiquidityDetailsRecord[i]._lowRisk.mul(powDecimal).mul(powDecimalPerc).div(lrPowDecimal);              
+                uint256 rewardAmount = ((liquidityRewardCollectedLowRisk.mul(powDecimal).mul(rewardPerc)).div(powDecimalPerc);         
+                rewardPaidRecord[LiquidityDetailsRecord[i]._address].push(RewardPaid(rewardAmount.div(powDecimal),block.timestamp,false));              
                 userLPReward[LiquidityDetailsRecord[i]._address] += rewardAmount;
             }
             else if (_isLowRisk == false && LiquidityDetailsRecord[i].isLowRisk == false) {
-                uint256 rewardPerc = ((LiquidityDetailsRecord[i]._highRisk.mul(10**decimals())).mul(100*10**decimals())).div(totalLiquidityHighRisk.mul(10**decimals()));
-                uint256 rewardAmount = ((liquidityRewardCollectedHighRisk.mul(10**decimals()) ).mul(rewardPerc) )/(100 * 10**decimals());               
-                rewardPaidRecord[LiquidityDetailsRecord[i]._address].push(RewardPaid(rewardAmount.div(10**decimals()),block.timestamp,false));               
+                uint256 rewardPerc = ((LiquidityDetailsRecord[i]._highRisk.mul(powDecimal).mul(powDecimalPerc).div(totalLiquidityHighRisk.mul(powDecimal);
+                uint256 rewardAmount = ((liquidityRewardCollectedHighRisk.mul(powDecimal).mul(rewardPerc)).div(powDecimalPerc);               
+                rewardPaidRecord[LiquidityDetailsRecord[i]._address].push(RewardPaid(rewardAmount.div(powDecimal),block.timestamp,false));               
                 userLPReward[LiquidityDetailsRecord[i]._address] += rewardAmount;
             }
         }
@@ -1041,7 +1065,8 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
         require(amount<=userLPReward[_msgSender()],"Insufficient Balance");
         userLPReward[_msgSender()] = userLPReward[_msgSender()].sub(amount.mul(10**decimals())); 
         TOKEN.safeTransfer(_msgSender(),amount);
-        rewardPaidRecord[_msgSender()].push(RewardPaid(amount,block.timestamp,true));       
+        rewardPaidRecord[_msgSender()].push(RewardPaid(amount,block.timestamp,true));
+        emit LPFeeCollected(amount, block.timestamp);       
     }
 
     /**
@@ -1065,8 +1090,8 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
     * @return LRLiq user liquidity in low risk pool (uint256)
     * @return HRLiq user liquidity in high risk pool (uint256)
     */
-    function getLiquidityStatsPerUser() external view returns (uint256 LPFeesCollected, uint256 LRLiq, uint256 HRLiq) {
-        return (userLPReward[_msgSender()].div(10**decimals()), currentLowLiquidity[_msgSender()], currentHighLiquidity[_msgSender()]);
+    function getLiquidityStatsPerUser() external view returns (uint256 LPFeesCollected, uint256 LRLiq, uint256 HRLiq, uint256 totalLiq) {
+        return (userLPReward[_msgSender()].div(10**decimals()), currentLowLiquidity[_msgSender()], currentHighLiquidity[_msgSender()], currentLowLiquidity[_msgSender()].add(currentHighLiquidity[_msgSender()]));
     }
 
     /**
