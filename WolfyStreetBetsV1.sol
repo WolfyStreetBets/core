@@ -538,9 +538,11 @@ contract WolfyStreetBetsV1 is Ownable, ReentrancyGuard, BaseRelayRecipient {
         }
         // (base * base) * exp
         else {
-            uint256 c = base.mul(base);
-            uint256 x = c.mul(exponent);
-            return x;
+            uint256 a = base;
+            for (uint256 i = 1; i < exponent; i++) {
+                a = mul(a, base);
+            }
+            return a;
         }
     }
 
